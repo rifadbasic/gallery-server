@@ -2,6 +2,9 @@ const express = require("express");
 const cors = require("cors");
 const app = express();
 const dotenv = require("dotenv");
+const FormData = require("form-data");
+const axios = require("axios");
+const sharp = require("sharp");
 dotenv.config();
 const port = process.env.PORT || 5000;
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
@@ -74,21 +77,21 @@ async function run() {
       next();
     };
 
-    const verifyPremiumUser = async (req, res, next) => {
+    const verifyCreatorUser = async (req, res, next) => {
       const email = req.user.email;
       const query = { email };
       const user = await usersCollection.findOne(query);
-      if (!user && user.status !== "premium") {
+      if (!user && user.status !== "creator") {
         return res.status(403).send({ message: "forbidden access" });
       }
       next();
     };
 
-    const verifyStandardUser = async (req, res, next) => {
+    const verifyArtistUser = async (req, res, next) => {
       const email = req.user.email;
       const query = { email };
       const user = await usersCollection.findOne(query);
-      if (!user && user.status !== "standard" && user.status !== "premium") {
+      if (!user && user.status !== "artist" && user.status !== "creator") {
         return res.status(403).send({ message: "forbidden access" });
       }
       next();
@@ -126,7 +129,7 @@ async function run() {
       }
     });
 
-    app.get("/user-images", verifyToken, async (req, res) => {
+    app.get("/user-images", verifyToken, verifyArtistUser, async (req, res) => {
       const { email, page = 1, limit = 10 } = req.query;
       const skip = (page - 1) * limit;
       const emailFromToken = req.user.email;
@@ -149,7 +152,39 @@ async function run() {
       });
     });
 
-    // POST: Add new image
+ 
+    // GET /images/favorites/:email
+    app.get("/images/favorites/:email", verifyToken, verifyArtistUser, async (req, res) => {
+      const email = req.params.email;
+      try {
+        const favorites = await imageCollection
+          .find({ favorites: { $in: [email] } })
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.json(favorites);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // GET /images/purchased/:email
+    app.get("/images/purchased/:email", verifyToken, verifyArtistUser, async (req, res) => {
+      const email = req.params.email;
+      try {
+        const purchased = await imageCollection
+          .find({ sold: { $elemMatch: { buyerEmail: email } } })
+          .sort({ createdAt: -1 })
+          .toArray();
+        res.json(purchased);
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
+      }
+    });
+
+    // POST /images
+
     app.post("/images", async (req, res) => {
       try {
         const {
@@ -164,29 +199,94 @@ async function run() {
           finalPrice,
           likes,
           createdAt,
-          userEmail, // 👈 user info
+          userEmail,
           userName,
           userPhoto,
         } = req.body;
 
-        // ⚡ Create the image object with user info
+        if (!img || !img.startsWith("http")) {
+          return res.status(400).json({ error: "Invalid image URL" });
+        }
+
+        // 1️⃣ Download original image
+        const response = await axios.get(img, { responseType: "arraybuffer" });
+        const originalBuffer = Buffer.from(response.data, "binary");
+
+        // 2️⃣ Get metadata
+        const metadata = await sharp(originalBuffer).metadata();
+        const { width, height, format, size } = metadata;
+        // width & height in px, format like 'jpeg', size in bytes (optional: can calculate from buffer)
+
+        // 3️⃣ Create tiled watermark (your previous code)
+        const tileSize = Math.floor(width / 6);
+        const fontSize = Math.floor(tileSize / 4);
+
+        let svgTiles = "";
+        for (let y = 0; y < height; y += tileSize) {
+          for (let x = 0; x < width; x += tileSize) {
+            svgTiles += `
+          <text 
+            x="${x + tileSize / 2}" 
+            y="${y + tileSize / 2}" 
+            text-anchor="middle" 
+            alignment-baseline="middle"
+            font-size="${fontSize}" 
+            fill="white" 
+            opacity="0.15"
+            transform="rotate(-20, ${x + tileSize / 2}, ${y + tileSize / 2})"
+          >
+            GALLERY
+          </text>
+        `;
+          }
+        }
+
+        const svgWatermark = `
+      <svg width="${width}" height="${height}">
+        ${svgTiles}
+      </svg>
+    `;
+
+        const watermarkedBuffer = await sharp(originalBuffer)
+          .composite([{ input: Buffer.from(svgWatermark), gravity: "center" }])
+          .jpeg({ quality: 90 })
+          .toBuffer();
+
+        // 4️⃣ Upload watermarked image to ImgBB
+        const imgbbUrl = `https://api.imgbb.com/1/upload?key=${process.env.IMGBB_KEY}`;
+        const watermarkUpload = await axios.post(
+          imgbbUrl,
+          new URLSearchParams({
+            image: watermarkedBuffer.toString("base64"),
+          }).toString(),
+          { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
+        );
+
+        const watermarkedUrl = watermarkUpload.data.data.url;
+
+        // 5️⃣ Prepare DB payload
         const newImage = {
-          img,
+          originalImage: img,
+          watermarkedImage: watermarkedUrl,
           name,
           description,
           category,
           role,
-          status: "Pending", // New images are pending by default
+          status: "Pending",
           price: Number(price),
           discountPercent: Number(discountPercent),
           finalPrice: Number(finalPrice),
           likes: likes || 0,
           createdAt: createdAt || new Date(),
-
-          // user info
           userEmail,
           userName,
           userPhoto,
+
+          // ✅ Automatic metadata
+          width,
+          height,
+          format, // 'jpeg', 'png', etc.
+          size: originalBuffer.length, // size in bytes
         };
 
         const result = await imageCollection.insertOne(newImage);
@@ -197,7 +297,7 @@ async function run() {
           data: newImage,
         });
       } catch (error) {
-        console.error("Server Error:", error);
+        console.error("Server Error:", error.response?.data || error.message);
         res.status(500).json({ error: error.message });
       }
     });
@@ -212,6 +312,49 @@ async function run() {
         res.send(result);
       } catch (error) {
         res.status(500).json({ error: error.message });
+      }
+    });
+
+    // DELETE /images/purchased/:imageId/:userEmail
+    app.delete("/images/purchased/:imageId/:userEmail", async (req, res) => {
+      const { imageId, userEmail } = req.params;
+
+      try {
+        // 1️⃣ Remove from user's downloads
+        await usersCollection.updateOne(
+          { email: userEmail },
+          {
+            $pull: {
+              downloads: { imageId },
+            },
+          },
+        );
+
+        // 2️⃣ Remove from image sold array
+        const image = await imageCollection.findOne({
+          _id: new ObjectId(imageId),
+        });
+
+        if (!image) return res.status(404).json({ error: "Image not found" });
+
+        // Remove the buyer object from sold array
+        await imageCollection.updateOne(
+          { _id: new ObjectId(imageId) },
+          { $pull: { sold: { buyerEmail: userEmail } } },
+        );
+
+        // 3️⃣ Optional: If the image belongs to current user and no one else has purchased it, delete the image entirely
+        if (
+          image.userEmail === userEmail &&
+          (!image.sold || image.sold.length === 0)
+        ) {
+          await imageCollection.deleteOne({ _id: new ObjectId(imageId) });
+        }
+
+        res.json({ message: "Deleted purchased image successfully" });
+      } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
       }
     });
 
@@ -285,12 +428,10 @@ async function run() {
     });
 
     // GET /users/:email/favorites
-    app.get("/users/:email/favorites",  async (req, res) => {
+    app.get("/users/:email/favorites", async (req, res) => {
       const { email } = req.params;
 
       try {
-        
-
         const images = await imageCollection
           .find({ favorites: email }) // favorites: [{email: '...'}]
           .toArray();
@@ -329,7 +470,6 @@ async function run() {
         if (req.user.email !== email) {
           return res.status(403).json({ message: "Forbidden access" });
         }
-       
 
         const user = await usersCollection.findOne({ email });
 
@@ -497,6 +637,7 @@ async function run() {
       }
     });
 
+    // delete user profile
     app.delete("/users_profile/:email", async (req, res) => {
       try {
         const result = await usersCollection.deleteOne({
@@ -513,6 +654,8 @@ async function run() {
         res.status(500).send({ message: "Server error" });
       }
     });
+
+    // -----------payment -> subscription and image payment part---------------------
 
     // subscription part-------------------------
 
@@ -548,7 +691,7 @@ async function run() {
       res.status(200).json(user);
     });
 
-    // payment part-------------------------
+    // for subscription payment
 
     app.post("/create-payment-intent", async (req, res) => {
       const { amount, email, name } = req.body;
@@ -582,7 +725,7 @@ async function run() {
       if (parseInt(amount) === 999) {
         status = "artist";
       } else if (parseInt(amount) === 1999) {
-        status = "curator";
+        status = "creator";
       } else if (parseInt(amount) === 0) {
         status = "free";
       }
@@ -599,6 +742,183 @@ async function run() {
       );
 
       res.send(result);
+    });
+
+    // ----image payment part----
+
+    app.post("/create-image-payment-intent", async (req, res) => {
+      const { amount, buyerEmail, buyerName, sellerEmail, imageId } = req.body;
+
+      try {
+        const paymentIntent = await stripe.paymentIntents.create({
+          amount: parseInt(amount) * 100,
+          currency: "bdt",
+          payment_method_types: ["card"],
+          metadata: {
+            buyerEmail,
+            sellerEmail,
+            imageId,
+          },
+        });
+
+        res.send({ clientSecret: paymentIntent.client_secret });
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ error: "Payment creation failed" });
+      }
+    });
+
+    // purchase image
+    app.post("/purchase-image", verifyToken, async (req, res) => {
+      const {
+        imageId,
+        imageName,
+        imageLink,
+        price,
+        buyerEmail,
+        buyerName,
+        sellerEmail,
+        transactionId,
+      } = req.body;
+
+      const session = client.startSession();
+      session.startTransaction();
+
+      try {
+        // 1) Update IMAGE: add "sold" info
+        await imageCollection.updateOne(
+          { _id: new ObjectId(imageId) },
+          {
+            $set: { status: "Sold" },
+            $push: {
+              sold: {
+                buyerEmail,
+                buyerName,
+                boughtAt: new Date(),
+                transactionId,
+              },
+            },
+          },
+          { session },
+        );
+
+        // 2) Update USER (buyer): add to downloads
+        await usersCollection.updateOne(
+          { email: buyerEmail },
+          {
+            $push: {
+              downloads: {
+                imageId,
+                imageName,
+                imageLink,
+                price,
+                sellerEmail,
+                purchasedAt: new Date(),
+              },
+            },
+          },
+          { session },
+        );
+
+        // 3) Add to PAYMENT collection
+        await paymentCollection.insertOne(
+          {
+            pay_for: "image",
+            buyerEmail,
+            sellerEmail,
+            imageId,
+            imageName,
+            amount: price,
+            transactionId,
+            date: new Date(),
+          },
+          { session },
+        );
+
+        await session.commitTransaction();
+        res.status(200).json({ success: true });
+      } catch (error) {
+        await session.abortTransaction();
+        console.error(error);
+        res.status(500).json({ error: "Purchase failed" });
+      } finally {
+        session.endSession();
+      }
+    });
+
+    // free download image
+    app.post("/download-free-image", verifyToken, async (req, res) => {
+      const {
+        imageId,
+        imageName,
+        imageLink,
+        buyerEmail,
+        buyerName,
+        sellerEmail,
+      } = req.body;
+
+      const session = client.startSession();
+      session.startTransaction();
+
+      try {
+        // 1) Update IMAGE
+        await imageCollection.updateOne(
+          { _id: new ObjectId(imageId) },
+          {
+            $push: {
+              sold: {
+                buyerEmail,
+                buyerName,
+                boughtAt: new Date(),
+                transactionId: "FREE_DOWNLOAD",
+              },
+            },
+          },
+          { session },
+        );
+
+        // 2) Update USER downloads
+        await usersCollection.updateOne(
+          { email: buyerEmail },
+          {
+            $push: {
+              downloads: {
+                imageId,
+                imageName,
+                imageLink,
+                price: 0,
+                sellerEmail,
+                purchasedAt: new Date(),
+              },
+            },
+          },
+          { session },
+        );
+
+        // 3) Add to PAYMENT collection
+        // await paymentCollection.insertOne(
+        //   {
+        //     pay_for: "free_image",
+        //     buyerEmail,
+        //     sellerEmail,
+        //     imageId,
+        //     imageName,
+        //     amount: 0,
+        //     transactionId: "FREE_DOWNLOAD",
+        //     date: new Date(),
+        //   },
+        //   { session },
+        // );
+
+        await session.commitTransaction();
+        res.status(200).json({ success: true });
+      } catch (error) {
+        await session.abortTransaction();
+        console.error(error);
+        res.status(500).json({ error: "Free download failed" });
+      } finally {
+        session.endSession();
+      }
     });
 
     // Send a ping to confirm a successful connection
