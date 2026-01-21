@@ -233,15 +233,17 @@ async function run() {
 
     // POST /images
 
-    app.post("/images", async (req, res) => {
+    app.post("/images", upload.single("image"), async (req, res) => {
       try {
+        if (!req.file) {
+          return res.status(400).json({ error: "Image file is required" });
+        }
+
         const {
-          img,
           name,
           description,
           category,
           role,
-          status,
           price,
           discountPercent,
           finalPrice,
@@ -252,20 +254,31 @@ async function run() {
           userPhoto,
         } = req.body;
 
-        if (!img || !img.startsWith("http")) {
-          return res.status(400).json({ error: "Invalid image URL" });
-        }
+        // 1️⃣ Original buffer
+        const originalBuffer = req.file.buffer;
 
-        // 1️⃣ Download original image
-        const response = await axios.get(img, { responseType: "arraybuffer" });
-        const originalBuffer = Buffer.from(response.data, "binary");
-
-        // 2️⃣ Get metadata
+        // 2️⃣ Metadata
         const metadata = await sharp(originalBuffer).metadata();
-        const { width, height, format, size } = metadata;
-        // width & height in px, format like 'jpeg', size in bytes (optional: can calculate from buffer)
+        const { width, height, format } = metadata;
 
-        // 3️⃣ Create tiled watermark (your previous code)
+        /* ============================
+       🔹 A) UPLOAD ORIGINAL IMAGE
+       ============================ */
+        const imgbbUrl = `https://api.imgbb.com/1/upload?key=${process.env.IMGBB_KEY}`;
+
+        const originalUpload = await axios.post(
+          imgbbUrl,
+          new URLSearchParams({
+            image: originalBuffer.toString("base64"),
+          }).toString(),
+          { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
+        );
+
+        const originalImageUrl = originalUpload.data.data.url;
+
+        /* ============================
+       🔹 B) CREATE WATERMARK
+       ============================ */
         const tileSize = Math.floor(width / 6);
         const fontSize = Math.floor(tileSize / 4);
 
@@ -273,15 +286,17 @@ async function run() {
         for (let y = 0; y < height; y += tileSize) {
           for (let x = 0; x < width; x += tileSize) {
             svgTiles += `
-          <text 
-            x="${x + tileSize / 2}" 
-            y="${y + tileSize / 2}" 
-            text-anchor="middle" 
-            alignment-baseline="middle"
-            font-size="${fontSize}" 
-            fill="white" 
-            opacity="0.15"
-            transform="rotate(-20, ${x + tileSize / 2}, ${y + tileSize / 2})"
+          <text
+            x="${x + tileSize / 2}"
+            y="${y + tileSize / 2}"
+            text-anchor="middle"
+            dominant-baseline="middle"
+            font-size="${fontSize}"
+            font-family="Arial, Helvetica, sans-serif"
+            font-weight="bold"
+            fill="black"
+            opacity="0.25"
+            transform="rotate(-25, ${x + tileSize / 2}, ${y + tileSize / 2})"
           >
             GALLERY
           </text>
@@ -296,12 +311,13 @@ async function run() {
     `;
 
         const watermarkedBuffer = await sharp(originalBuffer)
-          .composite([{ input: Buffer.from(svgWatermark), gravity: "center" }])
+          .composite([{ input: Buffer.from(svgWatermark) }])
           .jpeg({ quality: 90 })
           .toBuffer();
 
-        // 4️⃣ Upload watermarked image to ImgBB
-        const imgbbUrl = `https://api.imgbb.com/1/upload?key=${process.env.IMGBB_KEY}`;
+        /* ============================
+       🔹 C) UPLOAD WATERMARK IMAGE
+       ============================ */
         const watermarkUpload = await axios.post(
           imgbbUrl,
           new URLSearchParams({
@@ -310,42 +326,46 @@ async function run() {
           { headers: { "Content-Type": "application/x-www-form-urlencoded" } },
         );
 
-        const watermarkedUrl = watermarkUpload.data.data.url;
+        const watermarkedImageUrl = watermarkUpload.data.data.url;
 
-        // 5️⃣ Prepare DB payload
+        /* ============================
+       🔹 D) DB PAYLOAD
+       ============================ */
         const newImage = {
-          originalImage: img,
-          watermarkedImage: watermarkedUrl,
+          originalImage: originalImageUrl, // ✅ FULL QUALITY
+          watermarkedImage: watermarkedImageUrl, // ✅ PROTECTED
+
           name,
           description,
           category,
           role,
           status: "Pending",
+
           price: Number(price),
           discountPercent: Number(discountPercent),
           finalPrice: Number(finalPrice),
-          likes: likes || 0,
+          likes: Number(likes) || 0,
           createdAt: createdAt || new Date(),
+
           userEmail,
           userName,
           userPhoto,
 
-          // ✅ Automatic metadata
           width,
           height,
-          format, // 'jpeg', 'png', etc.
-          size: originalBuffer.length, // size in bytes
+          format,
+          size: originalBuffer.length,
         };
 
         const result = await imageCollection.insertOne(newImage);
 
         res.status(201).json({
-          message: "Image added successfully 🌿",
+          message: "Image uploaded (original + watermark) ✨",
           insertedId: result.insertedId,
           data: newImage,
         });
       } catch (error) {
-        console.error("Server Error:", error.response?.data || error.message);
+        console.error("Server Error:", error.message);
         res.status(500).json({ error: error.message });
       }
     });
@@ -433,11 +453,13 @@ async function run() {
               x="${x + tileSize / 2}"
               y="${y + tileSize / 2}"
               text-anchor="middle"
-              alignment-baseline="middle"
+              dominant-baseline="middle"
               font-size="${fontSize}"
-              fill="white"
-              opacity="0.15"
-              transform="rotate(-20, ${x + tileSize / 2}, ${y + tileSize / 2})"
+              font-family="Arial, Helvetica, sans-serif"
+              font-weight="bold"
+              fill="black"
+              opacity="0.25"
+              transform="rotate(-25, ${x + tileSize / 2}, ${y + tileSize / 2})"
             >
               GALLERY
             </text>
@@ -1018,8 +1040,8 @@ async function run() {
         .project({ total: { $sum: "$amount" } })
         .toArray();
 
-        // total ammount er sum
-        const total = income.reduce((acc, curr) => acc + curr.total, 0);
+      // total ammount er sum
+      const total = income.reduce((acc, curr) => acc + curr.total, 0);
 
       res.send({ total });
     });
@@ -1073,11 +1095,10 @@ async function run() {
         .project({ total: { $sum: "$amount" } })
         .toArray();
 
-        // total ammount er sum
-        const total = income.reduce((acc, curr) => acc + curr.total, 0);
+      // total ammount er sum
+      const total = income.reduce((acc, curr) => acc + curr.total, 0);
 
       res.send({ total });
-      
     });
 
     // ----admin part-------------------------
@@ -1719,8 +1740,8 @@ async function run() {
         buyerName,
         sellerEmail,
         transactionId,
-        imageSize, // <-- (optional) যদি frontend থেকে পাঠাও
-        category, // <-- (optional)
+        imageSize, 
+        category, 
       } = req.body;
 
       const session = client.startSession();
