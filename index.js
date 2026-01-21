@@ -279,40 +279,49 @@ async function run() {
         /* ============================
        🔹 B) CREATE WATERMARK
        ============================ */
-        const tileSize = Math.floor(width / 6);
-        const fontSize = Math.floor(tileSize / 4);
+        const tileSize = Math.floor(width / 4); // 🔧 bigger tiles
+        const fontSize = Math.floor(tileSize / 3);
 
         let svgTiles = "";
+
         for (let y = 0; y < height; y += tileSize) {
           for (let x = 0; x < width; x += tileSize) {
             svgTiles += `
-          <text
-            x="${x + tileSize / 2}"
-            y="${y + tileSize / 2}"
-            text-anchor="middle"
-            dominant-baseline="middle"
-            font-size="${fontSize}"
-            font-family="Arial, Helvetica, sans-serif"
-            font-weight="bold"
-            fill="black"
-            opacity="0.25"
-            transform="rotate(-25, ${x + tileSize / 2}, ${y + tileSize / 2})"
-          >
-            GALLERY
-          </text>
-        `;
+                    <text
+                      x="${x + tileSize / 2}"
+                      y="${y + tileSize / 2}"
+                      text-anchor="middle"
+                      dominant-baseline="middle"
+                      font-size="${fontSize}"
+                      font-family="Arial, Helvetica, sans-serif"
+                      font-weight="900"
+                      fill="white"
+                      fill-opacity="0.45"
+                      stroke="black"
+                      stroke-width="2"
+                      stroke-opacity="0.35"
+                      transform="rotate(-30, ${x + tileSize / 2}, ${y + tileSize / 2})"
+                    >
+                      GALLERY
+                    </text>
+                  `;
           }
         }
 
         const svgWatermark = `
-      <svg width="${width}" height="${height}">
-        ${svgTiles}
-      </svg>
-    `;
+              <svg width="${width}" height="${height}">
+                ${svgTiles}
+              </svg>
+              `;
 
         const watermarkedBuffer = await sharp(originalBuffer)
-          .composite([{ input: Buffer.from(svgWatermark) }])
-          .jpeg({ quality: 90 })
+          .composite([
+            {
+              input: Buffer.from(svgWatermark),
+              blend: "overlay",
+            },
+          ])
+          .jpeg({ quality: 95 })
           .toBuffer();
 
         /* ============================
@@ -442,40 +451,49 @@ async function run() {
           const metadata = await sharp(originalBuffer).metadata();
           const { width, height, format } = metadata;
 
-          const tileSize = Math.floor(width / 6);
-          const fontSize = Math.floor(tileSize / 4);
+          const tileSize = Math.floor(width / 4); // 🔧 SAME AS POST
+          const fontSize = Math.floor(tileSize / 3);
 
           let svgTiles = "";
           for (let y = 0; y < height; y += tileSize) {
             for (let x = 0; x < width; x += tileSize) {
               svgTiles += `
-            <text
-              x="${x + tileSize / 2}"
-              y="${y + tileSize / 2}"
-              text-anchor="middle"
-              dominant-baseline="middle"
-              font-size="${fontSize}"
-              font-family="Arial, Helvetica, sans-serif"
-              font-weight="bold"
-              fill="black"
-              opacity="0.25"
-              transform="rotate(-25, ${x + tileSize / 2}, ${y + tileSize / 2})"
-            >
-              GALLERY
-            </text>
-          `;
-            }
-          }
+              <text
+                x="${x + tileSize / 2}"
+                y="${y + tileSize / 2}"
+                text-anchor="middle"
+                dominant-baseline="middle"
+                font-size="${fontSize}"
+                font-family="Arial, Helvetica, sans-serif"
+                font-weight="900"
+                fill="white"
+                fill-opacity="0.45"
+                stroke="black"
+                stroke-width="2"
+                stroke-opacity="0.35"
+                transform="rotate(-30, ${x + tileSize / 2}, ${y + tileSize / 2})"
+              >
+                GALLERY
+              </text>
+            `;
+                    }
+                  }
 
-          const svgWatermark = `
+                  const svgWatermark = `
         <svg width="${width}" height="${height}">
           ${svgTiles}
         </svg>
-      `;
+        `;
 
           const watermarkedBuffer = await sharp(originalBuffer)
-            .composite([{ input: Buffer.from(svgWatermark) }])
-            .jpeg({ quality: 90 })
+            .composite([
+              {
+                input: Buffer.from(svgWatermark),
+                blend: "overlay",
+              },
+            ])
+            .jpeg({ quality: 95 })
+
             .toBuffer();
 
           const imgbbUrl = `https://api.imgbb.com/1/upload?key=${process.env.IMGBB_KEY}`;
@@ -515,6 +533,24 @@ async function run() {
         console.error("Update Error:", error.message);
         res.status(500).json({ error: error.message });
       }
+    });
+
+    app.post("/images/bulk-delete", verifyToken, async (req, res) => {
+      const { imageIds } = req.body;
+
+      if (!Array.isArray(imageIds)) {
+        return res.status(400).json({ message: "Invalid image IDs" });
+      }
+
+      const objectIds = imageIds.map((id) => new ObjectId(id));
+
+      const result = await imageCollection.deleteMany({
+        _id: { $in: objectIds },
+      });
+
+      res.send({
+        deletedCount: result.deletedCount,
+      });
     });
 
     app.delete("/images/:id", async (req, res) => {
@@ -1664,12 +1700,12 @@ async function run() {
 
         // 🔥 ====== EMAIL BODY ====== 🔥
         const mailOptions = {
-          from: `"Gallery Pro" <${process.env.EMAIL_USER}>`,
+          from: `"Gallery" <${process.env.EMAIL_USER}>`,
           to: email,
           subject: "🎉 Subscription Successful — Welcome Aboard!",
           html: `
         <div style="font-family: Arial, sans-serif; padding: 20px;">
-          <h2>Welcome to Gallery Pro 🚀</h2>
+          <h2>Welcome to Gallery 🚀</h2>
           <p>Hi there!</p>
           <p>Your subscription has been successfully activated.</p>
 
@@ -1740,8 +1776,8 @@ async function run() {
         buyerName,
         sellerEmail,
         transactionId,
-        imageSize, 
-        category, 
+        imageSize,
+        category,
       } = req.body;
 
       const session = client.startSession();
@@ -1804,13 +1840,13 @@ async function run() {
 
         // 🔥 ====== EMAIL BODY (MOST IMPORTANT PART) ====== 🔥
         const mailOptions = {
-          from: `"Gallery Pro" <${process.env.EMAIL_USER}>`,
+          from: `"Gallery" <${process.env.EMAIL_USER}>`,
           to: buyerEmail,
           subject: "🎉 Image Purchase Successful — Thank You!",
           html: `
       <div style="font-family: Arial, sans-serif; padding: 20px;">
         <h2>🎉 Congratulations, ${buyerName}! 🎉</h2>
-        <p>You have successfully purchased an image from <strong>Gallery Pro</strong>.</p>
+        <p>You have successfully purchased an image from <strong>Gallery</strong>.</p>
 
         <h3>Purchase Details:</h3>
         <ul>
@@ -1832,7 +1868,7 @@ async function run() {
         </a></p>
 
         <p>Thank you for supporting our creators! 🌟</p>
-        <p>— Gallery Pro Team</p>
+        <p>— Gallery Team</p>
       </div>
       `,
         };
