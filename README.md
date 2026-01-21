@@ -125,8 +125,6 @@ All APIs are **secured using JWT & Firebase verification**.
   - users
   - images
   - payments
-  - favorites
-  - subscriptions
 - Optimized queries
 - Indexed email-based lookups
 
