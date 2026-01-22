@@ -12,11 +12,13 @@ const admin = require("firebase-admin");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const transporter = require("./mailer");
 const upload = require("./upload");
+const generateWatermarkSVG = require("./watermarkSvg");
+const applyWatermark = require("./applyWatermark");
 
 // key conversion
-const decoder = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
-  "utf8",
-);
+// const decoder = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
+//   "utf8",
+// );
 var serviceAccount = require("./firebase-admin-key.json");
 // const serviceAccount = JSON.parse(decoder);
 
@@ -61,7 +63,7 @@ async function run() {
       const token = authHeader.split(" ")[1];
       try {
         const decoded = await admin.auth().verifyIdToken(token);
-        req.user = decoded; // ✅ attach user info to req.user
+        req.user = decoded;
         next();
       } catch (error) {
         return res.status(401).json({ message: "Unauthorized", error });
@@ -222,7 +224,7 @@ async function run() {
           .sort({ createdAt: -1 })
           .skip(skip)
           .limit(limit)
-          .toArray(); // 🔥 THIS WAS MISSING
+          .toArray();
 
         res.send({ images });
       } catch (error) {
@@ -261,9 +263,6 @@ async function run() {
         const metadata = await sharp(originalBuffer).metadata();
         const { width, height, format } = metadata;
 
-        /* ============================
-       🔹 A) UPLOAD ORIGINAL IMAGE
-       ============================ */
         const imgbbUrl = `https://api.imgbb.com/1/upload?key=${process.env.IMGBB_KEY}`;
 
         const originalUpload = await axios.post(
@@ -276,43 +275,13 @@ async function run() {
 
         const originalImageUrl = originalUpload.data.data.url;
 
-        /* ============================
-       🔹 B) CREATE WATERMARK
-       ============================ */
-        const tileSize = Math.floor(width / 4); // 🔧 bigger tiles
-        const fontSize = Math.floor(tileSize / 3);
+        const tileSize = Math.floor(width / 4);
 
-        let svgTiles = "";
-
-        for (let y = 0; y < height; y += tileSize) {
-          for (let x = 0; x < width; x += tileSize) {
-            svgTiles += `
-                    <text
-                      x="${x + tileSize / 2}"
-                      y="${y + tileSize / 2}"
-                      text-anchor="middle"
-                      dominant-baseline="middle"
-                      font-size="${fontSize}"
-                      font-family="Arial, Helvetica, sans-serif"
-                      font-weight="900"
-                      fill="white"
-                      fill-opacity="0.45"
-                      stroke="black"
-                      stroke-width="2"
-                      stroke-opacity="0.35"
-                      transform="rotate(-30, ${x + tileSize / 2}, ${y + tileSize / 2})"
-                    >
-                      GALLERY
-                    </text>
-                  `;
-          }
-        }
-
-        const svgWatermark = `
-              <svg width="${width}" height="${height}">
-                ${svgTiles}
-              </svg>
-              `;
+        const svgWatermark = generateWatermarkSVG({
+          width,
+          height,
+          tileSize,
+        });
 
         const watermarkedBuffer = await sharp(originalBuffer)
           .composite([
@@ -324,9 +293,6 @@ async function run() {
           .jpeg({ quality: 95 })
           .toBuffer();
 
-        /* ============================
-       🔹 C) UPLOAD WATERMARK IMAGE
-       ============================ */
         const watermarkUpload = await axios.post(
           imgbbUrl,
           new URLSearchParams({
@@ -337,12 +303,9 @@ async function run() {
 
         const watermarkedImageUrl = watermarkUpload.data.data.url;
 
-        /* ============================
-       🔹 D) DB PAYLOAD
-       ============================ */
         const newImage = {
-          originalImage: originalImageUrl, // ✅ FULL QUALITY
-          watermarkedImage: watermarkedImageUrl, // ✅ PROTECTED
+          originalImage: originalImageUrl,
+          watermarkedImage: watermarkedImageUrl,
 
           name,
           description,
@@ -446,55 +409,11 @@ async function run() {
           const response = await axios.get(originalImage, {
             responseType: "arraybuffer",
           });
-          const originalBuffer = Buffer.from(response.data, "binary");
 
-          const metadata = await sharp(originalBuffer).metadata();
-          const { width, height, format } = metadata;
+          const originalBuffer = Buffer.from(response.data);
 
-          const tileSize = Math.floor(width / 4); // 🔧 SAME AS POST
-          const fontSize = Math.floor(tileSize / 3);
-
-          let svgTiles = "";
-          for (let y = 0; y < height; y += tileSize) {
-            for (let x = 0; x < width; x += tileSize) {
-              svgTiles += `
-              <text
-                x="${x + tileSize / 2}"
-                y="${y + tileSize / 2}"
-                text-anchor="middle"
-                dominant-baseline="middle"
-                font-size="${fontSize}"
-                font-family="Arial, Helvetica, sans-serif"
-                font-weight="900"
-                fill="white"
-                fill-opacity="0.45"
-                stroke="black"
-                stroke-width="2"
-                stroke-opacity="0.35"
-                transform="rotate(-30, ${x + tileSize / 2}, ${y + tileSize / 2})"
-              >
-                GALLERY
-              </text>
-            `;
-                    }
-                  }
-
-                  const svgWatermark = `
-        <svg width="${width}" height="${height}">
-          ${svgTiles}
-        </svg>
-        `;
-
-          const watermarkedBuffer = await sharp(originalBuffer)
-            .composite([
-              {
-                input: Buffer.from(svgWatermark),
-                blend: "overlay",
-              },
-            ])
-            .jpeg({ quality: 95 })
-
-            .toBuffer();
+          const { watermarkedBuffer, metadata } =
+            await applyWatermark(originalBuffer);
 
           const imgbbUrl = `https://api.imgbb.com/1/upload?key=${process.env.IMGBB_KEY}`;
           const uploadRes = await axios.post(
@@ -507,16 +426,10 @@ async function run() {
             },
           );
 
-          const watermarkedUrl = uploadRes.data.data.url;
-
           Object.assign(updateDoc, {
             originalImage,
-            watermarkedImage: watermarkedUrl,
-
-            width,
-            height,
-            format,
-            size: originalBuffer.length,
+            watermarkedImage: uploadRes.data.data.url,
+            ...metadata,
           });
         }
 
